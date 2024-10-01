@@ -1,0 +1,10 @@
+**/appsettings.json
+**/appsettings.*.json
+**/bin
+**/obj
+**/node_modules
+**/dist
+
+.mono
+**/.env
+**/.env.local
