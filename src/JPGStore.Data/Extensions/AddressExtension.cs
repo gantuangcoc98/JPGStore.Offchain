@@ -1,5 +1,3 @@
-
-
 using CardanoSharp.Wallet.Models.Addresses;
 
 namespace JPGStore.Data.Extensions;

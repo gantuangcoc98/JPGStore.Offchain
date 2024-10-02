@@ -1,18 +1,41 @@
-
 using System.ComponentModel.DataAnnotations.Schema;
-using System.Text.Json;
-using JPGStore.Data.Models.Reducers;
+using Cardano.Sync.Data.Models;
+using JPGStore.Data.Models.Datums;
+using JPGStore.Data.Models.Enums;
 
 namespace JPGStore.Data.Models.Reducers;
 
-public record ListingByAddress : Listing
+public record ListingByAddress
 {
-    [NotMapped]
-    public JPGStorePriceMapping ListingValue { get; set; } = default!;
+    public string OwnerAddress { get; set; } = default!;
+    public string TxHash { get; set; } = default!;
+    public ulong TxIndex { get; set; }
+    public ulong Slot { get; set; }
+    public Value Amount { get; set; } = default!;
+    public UtxoStatus UtxoStatus { get; set; }
+    public ListingStatus Status { get; set; }
+    public ulong EstimatedTotalListingValue { get; set; } = 0;
+    public ulong EstimatedFromListingValue { get; set; } = 0;
+    public ulong EstimatedToListingValue { get; set; } = 0;
 
-    public string ListingValueJson
+    // Optional fields populated when listing is consumed
+    public string? BuyerAddress { get; set; }
+    public string? SpentTxHash { get; set; }
+    public Value? SellerPayoutValue { get; set; }
+
+    public byte[] ListingDatumCbor { get; set; } = default!;
+
+    [NotMapped]
+    public ListingDatum ListingDatum
     {
-        get => JsonSerializer.Serialize(ListingValue);
-        set => ListingValue = JsonSerializer.Deserialize<JPGStorePriceMapping>(value) ?? throw new InvalidOperationException("Unable to deserialize.");
+        get
+        {
+            return CborConverter.Deserialize<ListingDatum>(ListingDatumCbor) ?? throw new Exception("Invalid ListingDatumCbor");
+        }
+
+        set
+        {
+            ListingDatumCbor = CborConverter.Serialize(value);
+        }
     }
 }

@@ -6,18 +6,24 @@ using CborSerialization;
 namespace JPGStore.Data.Models.Datums;
 
 /*
-121([_
-121([_ 121([_ h'00000000000001']), 122([])]),
-{_
-    h'': {_ h'': 10000},
-    h'6e66745f706f6c6963795f31': {_ h'6e66745f31': 1},
-},
-])
-
-d8799fd8799fd8799f4700000000000001ffd87a80ffa240a1401927104c6e66745f706f6c6963795f31a1456e66745f3101ff
+121_0([_
+    121_0([_
+        121_0([_
+            h'ad6dda1cfe89c1091577e83b0ded3ae2d4cc641edf568d1e89cf6ea0',
+        ]),
+        121_0([_
+            121_0([_
+                121_0([_
+                    h'58d91bc654dd9993b1e45727493c00a8cc11b2c55b81519db72d01fe',
+                ]),
+            ]),
+        ]),
+    ]),
+    1000000_2,
+]),
 */
 [CborSerialize(typeof(PayoutCborConvert))]
-public record Payout(Address Address, PayoutValue Amount) : IDatum;
+public record Payout(Address Address, ulong Amount) : IDatum;
 
 public class PayoutCborConvert : ICborConvertor<Payout>
 {
@@ -32,7 +38,7 @@ public class PayoutCborConvert : ICborConvertor<Payout>
         reader.ReadStartArray();
         ReadOnlyMemory<byte> credential = reader.ReadEncodedValue();
         Address address = CborConverter.Deserialize<Address>(credential.Span.ToArray());
-        PayoutValue amount = CborConverter.Deserialize<PayoutValue>(reader.ReadEncodedValue().Span.ToArray());
+        ulong amount = reader.ReadUInt64();
         reader.ReadEndArray();
         return new Payout(address, amount);
     }
@@ -42,7 +48,7 @@ public class PayoutCborConvert : ICborConvertor<Payout>
         writer.WriteTag((CborTag)121);
         writer.WriteStartArray(null);
         writer.WriteEncodedValue(CborConverter.Serialize(value.Address));
-        writer.WriteEncodedValue(CborConverter.Serialize(value.Amount));
+        writer.WriteUInt64(value.Amount);
         writer.WriteEndArray();
     }
 }

@@ -1,18 +1,15 @@
 using Cardano.Sync;
 using Cardano.Sync.Reducers;
-using JPGStore.Sync.Reducers;
-using JPGStore.Sync.Workers;
 using JPGStore.Data.Models;
+using JPGStore.Sync.Reducers;
 using Microsoft.EntityFrameworkCore;
-using JPGStore.Data.Services;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddCardanoIndexer<JPGStoreSyncDbContext>(builder.Configuration, builder.Configuration.GetValue("DatabaseQueryTimeout", 60 * 60 * 10));
-builder.Services.AddSingleton<IReducer, ListingByAddressReducer>();
-builder.Services.AddSingleton<JPGStoreDataService>();
 
-builder.Services.AddHostedService<VirtualMempoolWorker>();
+// Reducers
+builder.Services.AddSingleton<IReducer, ListingByAddressReducer>();
 
 WebApplication app = builder.Build();
 
