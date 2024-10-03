@@ -14,6 +14,7 @@ using Block = PallasDotnet.Models.Block;
 using TransactionOutput = PallasDotnet.Models.TransactionOutput;
 using CardanoSharp.Wallet.Utilities;
 using JPGStore.Data.Utils;
+using Crashr.Data.Models.Datums;
 
 namespace JPGStore.Sync.Reducers;
 
@@ -24,14 +25,22 @@ public class ListingByAddressReducer
     ILogger<ListingByAddressReducer> logger
 ) : IReducer
 {
-    private readonly string _validatorPkh = configuration["JPGStoreMarketplaceValidatorScriptHash"]!;
+    private readonly string _v1validatorPkh = configuration["JPGStoreMarketplaceV1ValidatorScriptHash"]!;
+    private readonly string _v2validatorPkh = configuration["JPGStoreMarketplaceV2ValidatorScriptHash"]!;
     private readonly ILogger<ListingByAddressReducer> _logger = logger;
 
     public async Task RollBackwardAsync(NextResponse response)
     {
-        _logger.Log(LogLevel.Trace, "Processing rollback.");
+        using JPGStoreSyncDbContext _dbContext = dbContextFactory.CreateDbContext();
 
-        await Task.CompletedTask;
+        // Remove all entries with slot greater than the rollback slot
+        ulong rollbackSlot = response.Block.Slot;
+        IQueryable<ListingByAddress> rollbackEntries = _dbContext.ListingsByAddress.AsNoTracking().Where(lba => lba.Slot > rollbackSlot);
+        _dbContext.ListingsByAddress.RemoveRange(rollbackEntries);
+
+        // Save changes
+        await _dbContext.SaveChangesAsync();
+        await _dbContext.DisposeAsync();
     }
 
     public async Task RollForwardAsync(NextResponse response)
@@ -42,10 +51,140 @@ public class ListingByAddressReducer
         foreach (TransactionBody tx in transactions)
         {
             await ProcessOutputsAsync(response.Block, tx, _dbContext);
+            await ProcessInputsAsync(response.Block, tx, _dbContext);
         }
 
         await _dbContext.SaveChangesAsync();
         await _dbContext.DisposeAsync();
+    }
+
+    private async Task ProcessInputsAsync(Block block, TransactionBody tx, JPGStoreSyncDbContext _dbContext)
+    {   
+        string txHash = tx.Id.ToHex();
+        List<string> inputOutRefs = tx.Inputs.Select(input => input.Id.ToHex().ToLowerInvariant() + input.Index).ToList();
+        inputOutRefs.Sort();
+
+        List<ListingByAddress> existingListings = await _dbContext.ListingsByAddress
+            .AsNoTracking()
+            .Where(lba => inputOutRefs.Contains(lba.TxHash + lba.TxIndex))
+            .ToListAsync();
+
+        foreach (ListingByAddress existingListing in existingListings)
+        {
+            ListingByAddress spentListing = new()
+            {
+                OwnerAddress = existingListing.OwnerAddress,
+                TxHash = existingListing.TxHash,
+                TxIndex = existingListing.TxIndex,
+                Slot = block.Slot,
+                Amount = new()
+                {
+                    Coin = existingListing.Amount.Coin,
+                    MultiAsset = existingListing.Amount.MultiAsset
+                },
+                ListingDatum = existingListing.ListingDatum,
+                SpentTxHash = tx.Id.ToHex(),
+                UtxoStatus = UtxoStatus.Spent,
+                EstimatedTotalListingValue = default!,
+                EstimatedFromListingValue = default!,
+                EstimatedToListingValue = default
+            };
+
+            int redeemerIndex = inputOutRefs.IndexOf(existingListing.TxHash + existingListing.TxIndex);
+
+            // Find the redeemer of the input
+            Redeemer? redeemer = tx.Redeemers?
+                .Where(r => r.Index == redeemerIndex)
+                .FirstOrDefault();
+
+            // Something went wrong if there's no redeemer
+            if (redeemer is null) continue;
+
+            string redeemerCborHex = Convert.ToHexString(redeemer.Data);
+
+            try 
+            {
+                BuyRedeemer buyRedeemer = CborConverter.Deserialize<BuyRedeemer>(redeemer.Data);
+                string sellerAddr = existingListing.OwnerAddress;
+                string sellerPkh = Convert.ToHexString(new CardanoSharpAddress(sellerAddr).GetPublicKeyHash()).ToLowerInvariant();
+
+                TransactionOutput? sellerOutput = tx.Outputs
+                    .SkipWhile((o, i) => i < (int)buyRedeemer.Offset)
+                    .FirstOrDefault(o => Convert.ToHexString(
+                        new CardanoSharpAddress(o.Address.Raw).GetPublicKeyHash()).Equals(sellerPkh,
+                        StringComparison.InvariantCultureIgnoreCase));
+
+                List<string> payoutPkhs = existingListing.ListingDatum.Payouts
+                    .Select(p => Convert.ToHexString(p.Address.Credential.Hash).ToLowerInvariant())
+                    .ToList();
+
+                payoutPkhs.Add(_v1validatorPkh);
+
+                // Buyer address is the first output that's not the fee address
+                // or any address in the payout
+                string? buyerAddress = null;
+
+                try
+                {
+                    buyerAddress = tx.Outputs
+                    .SkipWhile((o, i) => i < (int)buyRedeemer.Offset)
+                    .FirstOrDefault(o => !payoutPkhs.Contains(Convert.ToHexString(
+                        new CardanoSharpAddress(o.Address.Raw).GetPublicKeyHash()).ToLowerInvariant()))?
+                    .Address.Raw!.ToBech32();
+                }
+                catch { }
+
+                // If buyer address is in the payout pkh, something went wrong?
+                // It could be the seller bought his own listing, so we'll leave the buyer address as null
+                spentListing.BuyerAddress = buyerAddress;
+                spentListing.Status = ListingStatus.Sold;
+                spentListing.SellerPayoutValue = new()
+                {
+                    Coin = sellerOutput!.Amount.Coin,
+                    MultiAsset = sellerOutput.Amount.MultiAsset.ToDictionary(k => k.Key.ToHex(), v => v.Value.ToDictionary(
+                            k => k.Key.ToHex(),
+                            v => v.Value
+                    ))
+                };
+            }
+            catch
+            {  
+                // Check if it is update or a cancel listing
+                string? existingListingSubject = existingListing.Amount.MultiAsset
+                    .Select(ma => ma.Value
+                        .Select(v => ma.Key + v.Key)
+                        .FirstOrDefault())
+                    .FirstOrDefault();
+
+                List<string> txOutputsSubjects = tx.Outputs
+                    .Where(o => 
+                    {
+                        string outputBech32Addr = o.Address.Raw.ToBech32()!;
+
+                        string pkh = Convert.ToHexString(new CardanoSharpAddress(outputBech32Addr).GetPublicKeyHash()).ToLowerInvariant();
+
+                        return pkh == _v1validatorPkh;
+                    })
+                    .SelectMany(o => o.Amount.MultiAsset
+                        .Select(ma => ma.Value
+                            .Select(v => ma.Key.ToHex() + v.Key.ToHex()))
+                        .FirstOrDefault()!)
+                    .ToList();
+
+                if (existingListingSubject != null && txOutputsSubjects.Contains(existingListingSubject))
+                {
+                    spentListing.Status = ListingStatus.Updated;
+                }
+                else
+                {
+                    spentListing.Status = ListingStatus.Canceled;
+                }
+            }
+
+            await _dbContext.AddAsync(spentListing);
+        }
+
+        await Task.CompletedTask;
     }
 
     private async Task ProcessOutputsAsync(Block block, TransactionBody tx, JPGStoreSyncDbContext _dbContext)
@@ -60,7 +199,7 @@ public class ListingByAddressReducer
             // If output is sent to the marketplace validator, process the output as new listing
             string pkh = Convert.ToHexString(new CardanoSharpAddress(outputBech32Addr).GetPublicKeyHash()).ToLowerInvariant();
 
-            if (pkh != _validatorPkh) continue;
+            if (pkh != _v1validatorPkh && pkh != _v2validatorPkh) continue;
 
             if (output.Datum is null) continue;
             
@@ -119,8 +258,8 @@ public class ListingByAddressReducer
                         EstimatedFromListingValue = default,
                         EstimatedToListingValue = default
                     };
-
-                    _dbContext.ListingsByAddress.Add(listingByAddress);
+                    
+                    await _dbContext.AddAsync(listingByAddress);
                 }
                 catch (Exception e)
                 {
