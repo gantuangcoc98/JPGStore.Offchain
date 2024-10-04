@@ -1,8 +1,5 @@
-using System.ComponentModel.DataAnnotations.Schema;
 using Cardano.Sync.Data.Models;
-using JPGStore.Data.Models.Datums;
 using JPGStore.Data.Models.Enums;
-
 namespace JPGStore.Data.Models.Reducers;
 
 public record ListingByAddress
@@ -23,19 +20,5 @@ public record ListingByAddress
     public string? SpentTxHash { get; set; }
     public Value? SellerPayoutValue { get; set; }
 
-    public byte[] ListingDatumCbor { get; set; } = default!;
-
-    [NotMapped]
-    public ListingDatum ListingDatum
-    {
-        get
-        {
-            return CborConverter.Deserialize<ListingDatum>(ListingDatumCbor) ?? throw new Exception("Invalid ListingDatumCbor");
-        }
-
-        set
-        {
-            ListingDatumCbor = CborConverter.Serialize(value);
-        }
-    }
+    public byte[]? ListingDatumCbor { get; set; } = default!;
 }

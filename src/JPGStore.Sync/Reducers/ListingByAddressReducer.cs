@@ -3,18 +3,24 @@ using Cardano.Sync.Reducers;
 using CardanoSharp.Wallet.Extensions.Models;
 using JPGStore.Data.Extensions;
 using JPGStore.Data.Models;
-using JPGStore.Data.Models.Datums;
 using JPGStore.Data.Models.Enums;
 using JPGStore.Data.Models.Reducers;
 using Microsoft.EntityFrameworkCore;
 using PallasDotnet.Models;
 using CardanoSharpAddress = CardanoSharp.Wallet.Models.Addresses.Address;
+using ChrysalisAddress = Chrysalis.Cardano.Models.Plutus.Address;
 using DatumType = PallasDotnet.Models.DatumType;
 using Block = PallasDotnet.Models.Block;
 using TransactionOutput = PallasDotnet.Models.TransactionOutput;
-using CardanoSharp.Wallet.Utilities;
 using JPGStore.Data.Utils;
-using Crashr.Data.Models.Datums;
+using Chrysalis.Cardano.Models.Plutus;
+using CardanoSharp.Wallet.Extensions;
+using Crashr.Data.Models.Redeemers;
+using Chrysalis.Cbor;
+using Chrysalis.Cardano.Models.Cbor;
+using JPGStore.Data.Models.Datums;
+using System.Net;
+using CardanoSharp.Wallet.Utilities;
 
 namespace JPGStore.Sync.Reducers;
 
@@ -82,7 +88,6 @@ public class ListingByAddressReducer
                     Coin = existingListing.Amount.Coin,
                     MultiAsset = existingListing.Amount.MultiAsset
                 },
-                ListingDatum = existingListing.ListingDatum,
                 SpentTxHash = tx.Id.ToHex(),
                 UtxoStatus = UtxoStatus.Spent,
                 EstimatedTotalListingValue = default!,
@@ -104,18 +109,26 @@ public class ListingByAddressReducer
 
             try 
             {
-                BuyRedeemer buyRedeemer = CborConverter.Deserialize<BuyRedeemer>(redeemer.Data);
+                Buy? buyRedeemer = CborSerializer.Deserialize<Buy>(redeemer.Data);
                 string sellerAddr = existingListing.OwnerAddress;
                 string sellerPkh = Convert.ToHexString(new CardanoSharpAddress(sellerAddr).GetPublicKeyHash()).ToLowerInvariant();
 
+                if (buyRedeemer is null) continue;
+                
                 TransactionOutput? sellerOutput = tx.Outputs
-                    .SkipWhile((o, i) => i < (int)buyRedeemer.Offset)
+                    .SkipWhile((o, i) => i < buyRedeemer.Offset.Value)
                     .FirstOrDefault(o => Convert.ToHexString(
                         new CardanoSharpAddress(o.Address.Raw).GetPublicKeyHash()).Equals(sellerPkh,
                         StringComparison.InvariantCultureIgnoreCase));
 
-                List<string> payoutPkhs = existingListing.ListingDatum.Payouts
-                    .Select(p => Convert.ToHexString(p.Address.Credential.Hash).ToLowerInvariant())
+                if (existingListing.ListingDatumCbor is null) continue;
+
+                Listing? existingListingDatum = CborSerializer.Deserialize<Listing>(existingListing.ListingDatumCbor);
+
+                if (existingListingDatum is null) continue;
+
+                List<string> payoutPkhs = existingListingDatum.Payouts.Value
+                    .Select(p => Convert.ToHexString(((VerificationKey)p.Address.PaymentCredential).VerificationKeyHash.Value))
                     .ToList();
 
                 payoutPkhs.Add(_v1validatorPkh);
@@ -127,7 +140,7 @@ public class ListingByAddressReducer
                 try
                 {
                     buyerAddress = tx.Outputs
-                    .SkipWhile((o, i) => i < (int)buyRedeemer.Offset)
+                    .SkipWhile((o, i) => i < buyRedeemer.Offset.Value)
                     .FirstOrDefault(o => !payoutPkhs.Contains(Convert.ToHexString(
                         new CardanoSharpAddress(o.Address.Raw).GetPublicKeyHash()).ToLowerInvariant()))?
                     .Address.Raw!.ToBech32();
@@ -181,7 +194,7 @@ public class ListingByAddressReducer
                 }
             }
 
-            await _dbContext.AddAsync(spentListing);
+            _dbContext.Add(spentListing);
         }
 
         await Task.CompletedTask;
@@ -190,6 +203,7 @@ public class ListingByAddressReducer
     private async Task ProcessOutputsAsync(Block block, TransactionBody tx, JPGStoreSyncDbContext _dbContext)
     {
         string txHash = tx.Id.ToHex();
+
         foreach (TransactionOutput output in tx.Outputs)
         {
             string? outputBech32Addr = output.Address.Raw.ToBech32();
@@ -209,27 +223,19 @@ public class ListingByAddressReducer
                 {   
                     if (tx.MetaData is null) continue;
 
-                    string datumCborHex = string.Concat
-                    (
-                        tx.MetaData.Value
-                            .EnumerateArray()
-                            .Where(element => element[0].GetInt32() != 30)
-                            .Select(element => element[1].GetProperty("Text").GetString()?.Replace(",", ""))
-                    );
+                    List<string> datumCborHexList = JPGStoreUtils.MapMetadataToCborHexList(tx.MetaData.Value);
 
-                    byte[] datum = Convert.FromHexString(datumCborHex);
+                    byte[] datum = Convert.FromHexString(datumCborHexList[(int)output.Index]);
 
-                    ListingDatum listingDatum = CborConverter.Deserialize<ListingDatum>(datum);
+                    string txOutputDatumHash = Convert.ToHexString(datum).ToLowerInvariant();
 
-                    Cardano.Sync.Data.Models.Datums.Address? ownerCredential = listingDatum.Payouts
-                        .Select(po => po.Address)
-                        .Where(a => Convert.ToHexString(a.Credential.Hash).Equals(listingDatum.OwnerPkh, StringComparison.InvariantCultureIgnoreCase))
-                        .FirstOrDefault();
+                    ChrysalisAddress? ownerCredential = pkh == _v1validatorPkh ? 
+                        JPGStoreUtils.GetOwnerCredentialFromDatum(datum, TransactionDatum.Listing) :
+                        JPGStoreUtils.GetOwnerCredentialFromDatum(datum, TransactionDatum.Offer);
 
-                    string ownerAddressBech32 = AddressUtility.GetBaseAddress(
-                        ownerCredential!.Credential.Hash,
-                        ownerCredential.StakeCredential?.Credential.Hash ?? [],
-                        JPGStoreUtils.GetNetworkType(configuration)).ToString();
+                    string ownerAddressBech32 = pkh == _v1validatorPkh ? 
+                        AddressUtility.GetEnterpriseAddress(CborSerializer.Deserialize<Listing>(datum)!.OwnerPkh.Value, CardanoSharp.Wallet.Enums.NetworkType.Mainnet).ToString() :
+                        AddressUtility.GetEnterpriseAddress(CborSerializer.Deserialize<Offer>(datum)!.OwnerPkh.Value, CardanoSharp.Wallet.Enums.NetworkType.Mainnet).ToString();
 
                     if (ownerCredential is null)
                     {
@@ -251,7 +257,6 @@ public class ListingByAddressReducer
                             v => v.Value
                         ))
                         },
-                        ListingDatum = listingDatum,
                         UtxoStatus = UtxoStatus.Unspent,
                         Status = ListingStatus.Created,
                         EstimatedTotalListingValue = default,
@@ -259,7 +264,18 @@ public class ListingByAddressReducer
                         EstimatedToListingValue = default
                     };
                     
-                    await _dbContext.AddAsync(listingByAddress);
+                    if (pkh == _v1validatorPkh)
+                    {
+                        Listing? listingDatum = CborSerializer.Deserialize<Listing>(datum);
+                        listingByAddress.ListingDatumCbor = CborSerializer.Serialize(listingDatum!);
+                    }
+                    else if (pkh == _v2validatorPkh) 
+                    {
+                        Offer? offerDatum = CborSerializer.Deserialize<Offer>(datum);
+                        listingByAddress.ListingDatumCbor = CborSerializer.Serialize(offerDatum!);
+                    }
+                    
+                    _dbContext.Add(listingByAddress);
                 }
                 catch (Exception e)
                 {
