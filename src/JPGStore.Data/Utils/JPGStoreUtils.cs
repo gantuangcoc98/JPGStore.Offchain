@@ -8,6 +8,7 @@ using Chrysalis.Cardano.Models.Plutus;
 using ChrysalisAddress = Chrysalis.Cardano.Models.Plutus.Address;
 using Chrysalis.Cbor;
 using CborSerialization;
+using System.Text.RegularExpressions;
 
 namespace JPGStore.Data.Utils;
 
@@ -29,48 +30,37 @@ public static class JPGStoreUtils
         List<string> datumCborHexList = [];
         StringBuilder datumCborHex = new();
         
+        Regex specialCharRegex = new(@"[:,](?!$)", RegexOptions.Compiled);
+
         foreach (JsonElement element in metadataValue.EnumerateArray())
         {
             if (element[0].GetInt64() == 30) continue;
 
             string? text = element[1].GetProperty("Text").GetString();
 
-            if (text != null)
+            if (text is null) continue;
+
+            if (specialCharRegex.IsMatch(text)) continue;
+
+            if (text.EndsWith(','))
             {
-                if (text.EndsWith(','))
-                {
-                    datumCborHex.Append(text.TrimEnd(','));
-                    datumCborHexList.Add(datumCborHex.ToString());
-                    datumCborHex.Clear();
-                }
-                else
-                {
-                    datumCborHex.Append(text);
-                }
+                datumCborHex.Append(text.TrimEnd(','));
+                datumCborHexList.Add(datumCborHex.ToString());
+                datumCborHex.Clear();
+            }
+            else
+            {
+                datumCborHex.Append(text);
             }
         }
 
         return datumCborHexList;
     }
 
-    public static ChrysalisAddress? GetOwnerCredentialFromDatum(byte[] datum, TransactionDatum datumType)
+    public static byte[]? GetStakeVerificationKeyFromAddress(ChrysalisAddress address)
     {
-        switch (datumType)
-        {
-            case TransactionDatum.Listing:
-                Listing listingDatum = CborSerializer.Deserialize<Listing>(datum) ?? throw new CborException($"Unable to derserialize listing datum: {Convert.ToHexString(datum)}");
-                return listingDatum.Payouts.Value
-                    .Select(po => po.Address)
-                    .Where(a => Convert.ToHexString(((VerificationKey)a.PaymentCredential).VerificationKeyHash.Value).Equals(Convert.ToHexString(listingDatum.OwnerPkh.Value), StringComparison.InvariantCultureIgnoreCase))
-                    .FirstOrDefault();
-            case TransactionDatum.Offer:
-                Offer offerDatum = CborSerializer.Deserialize<Offer>(datum) ?? throw new CborException($"Unable to derserialize offer datum: {Convert.ToHexString(datum)}");
-                return offerDatum.Payouts.Value
-                    .Select(po => po.Address)
-                    .Where(a => Convert.ToHexString(((VerificationKey)a.PaymentCredential).VerificationKeyHash.Value).Equals(Convert.ToHexString(offerDatum.OwnerPkh.Value), StringComparison.InvariantCultureIgnoreCase))
-                    .FirstOrDefault();
-            default:
-                return null;
-        }
+        if (address.StakeCredential is not Some<Inline<Credential>> someInlineCredential) return null;
+
+        return ((VerificationKey)someInlineCredential.Value.Value).VerificationKeyHash.Value;
     }
 }

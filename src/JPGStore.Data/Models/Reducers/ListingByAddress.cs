@@ -20,5 +20,5 @@ public record ListingByAddress
     public string? SpentTxHash { get; set; }
     public Value? SellerPayoutValue { get; set; }
 
-    public byte[]? ListingDatumCbor { get; set; } = default!;
+    public byte[] ListingDatumCbor { get; set; } = default!;
 }

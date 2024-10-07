@@ -8,10 +8,11 @@
 
   <ItemGroup>
     <PackageReference Include="Chrysalis" Version="0.2.2" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.2">
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.8">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="NSec.Cryptography" Version="24.4.0" />
     <PackageReference Include="SAIB.Cardano.Sync" Version="0.2.36-alpha" />
     <PackageReference Include="Pallas.NET" Version="0.1.38" />
   </ItemGroup>

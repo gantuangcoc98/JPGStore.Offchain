@@ -1,4 +1,3 @@
-using Cardano.Sync.Data.Models;
 using Cardano.Sync.Reducers;
 using CardanoSharp.Wallet.Extensions.Models;
 using JPGStore.Data.Extensions;
@@ -17,10 +16,10 @@ using Chrysalis.Cardano.Models.Plutus;
 using CardanoSharp.Wallet.Extensions;
 using Crashr.Data.Models.Redeemers;
 using Chrysalis.Cbor;
-using Chrysalis.Cardano.Models.Cbor;
 using JPGStore.Data.Models.Datums;
-using System.Net;
 using CardanoSharp.Wallet.Utilities;
+using CborSerialization;
+using NSec.Cryptography;
 
 namespace JPGStore.Sync.Reducers;
 
@@ -92,7 +91,8 @@ public class ListingByAddressReducer
                 UtxoStatus = UtxoStatus.Spent,
                 EstimatedTotalListingValue = default!,
                 EstimatedFromListingValue = default!,
-                EstimatedToListingValue = default
+                EstimatedToListingValue = default,
+                ListingDatumCbor = existingListing.ListingDatumCbor ?? throw new CborException("NULL value was found in ListingByAddress table")
             };
 
             int redeemerIndex = inputOutRefs.IndexOf(existingListing.TxHash + existingListing.TxIndex);
@@ -106,6 +106,21 @@ public class ListingByAddressReducer
             if (redeemer is null) continue;
 
             string redeemerCborHex = Convert.ToHexString(redeemer.Data);
+
+            bool isOnListingTransaction = false;
+
+            // Check if the existingListingInput is an Offer Contract
+            Offer? offerDatum = null;
+
+            try
+            {
+                byte[] existingOfferDatum = existingListing.ListingDatumCbor;
+                offerDatum = CborSerializer.Deserialize<Offer>(existingOfferDatum);
+            }
+            catch
+            {
+                isOnListingTransaction = true;
+            }
 
             try 
             {
@@ -162,35 +177,125 @@ public class ListingByAddressReducer
             }
             catch
             {  
-                // Check if it is update or a cancel listing
-                string? existingListingSubject = existingListing.Amount.MultiAsset
-                    .Select(ma => ma.Value
-                        .Select(v => ma.Key + v.Key)
-                        .FirstOrDefault())
-                    .FirstOrDefault();
-
-                List<string> txOutputsSubjects = tx.Outputs
-                    .Where(o => 
-                    {
-                        string outputBech32Addr = o.Address.Raw.ToBech32()!;
-
-                        string pkh = Convert.ToHexString(new CardanoSharpAddress(outputBech32Addr).GetPublicKeyHash()).ToLowerInvariant();
-
-                        return pkh == _v1validatorPkh;
-                    })
-                    .SelectMany(o => o.Amount.MultiAsset
+                if (isOnListingTransaction)
+                {
+                    // Check if it is update or a cancel listing
+                    string? existingListingSubject = existingListing.Amount.MultiAsset
                         .Select(ma => ma.Value
-                            .Select(v => ma.Key.ToHex() + v.Key.ToHex()))
-                        .FirstOrDefault()!)
-                    .ToList();
+                            .Select(v => ma.Key + v.Key)
+                            .FirstOrDefault())
+                        .FirstOrDefault();
 
-                if (existingListingSubject != null && txOutputsSubjects.Contains(existingListingSubject))
-                {
-                    spentListing.Status = ListingStatus.Updated;
+                    List<string> txOutputsSubjects = tx.Outputs
+                        .Where(o => 
+                        {
+                            string outputBech32Addr = o.Address.Raw.ToBech32()!;
+
+                            string pkh = Convert.ToHexString(new CardanoSharpAddress(outputBech32Addr).GetPublicKeyHash()).ToLowerInvariant();
+
+                            return pkh == _v1validatorPkh;
+                        })
+                        .SelectMany(o => o.Amount.MultiAsset
+                            .Select(ma => ma.Value
+                                .Select(v => ma.Key.ToHex() + v.Key.ToHex()))
+                            .FirstOrDefault()!)
+                        .ToList();
+
+                    if (existingListingSubject != null && txOutputsSubjects.Contains(existingListingSubject))
+                    {
+                        spentListing.Status = ListingStatus.Updated;
+                    }
+                    else
+                    {
+                        spentListing.Status = ListingStatus.Canceled;
+                    }
                 }
-                else
+                else if (offerDatum != null)
                 {
-                    spentListing.Status = ListingStatus.Canceled;
+                    Blake2b algorithm = HashAlgorithm.Blake2b_256;
+
+                    byte[] existingListingHashedDatum = algorithm.Hash(existingListing.ListingDatumCbor);
+
+                    bool isUpdateOutputExist = false;
+
+                    foreach (TransactionOutput output in tx.Outputs)
+                    {
+                        if (output.Datum is null) continue;
+
+                        if (output.Datum.Data.SequenceEqual(existingListingHashedDatum))
+                        {
+                            isUpdateOutputExist = true;
+                        }
+                    }
+
+                    if (isUpdateOutputExist)
+                    {
+                        spentListing.Status = ListingStatus.Updated;
+                    }
+                    else
+                    {
+                        string? offerOwnerPkh = Convert.ToHexString(offerDatum.OwnerPkh.Value).ToLowerInvariant();
+
+                        string? offerOwnerPayoutAsset = offerDatum.Payouts.Value
+                            .Where(po => 
+                            {
+                                byte[] payoutPaymentVKey = ((VerificationKey)po.Address.PaymentCredential).VerificationKeyHash.Value;
+
+                                string payoutPaymentKeyHash = Convert.ToHexString(payoutPaymentVKey);
+
+                                return payoutPaymentKeyHash.Equals(offerOwnerPkh, StringComparison.InvariantCultureIgnoreCase);
+                            })
+                            .Select(po => po.PayoutValue.Value
+                                .Select(v => v.Value
+                                    .Amount.Value
+                                        .Select(t => Convert.ToHexString(v.Key.Value) + Convert.ToHexString(t.Key.Value))
+                                        .FirstOrDefault()
+                                )
+                                .FirstOrDefault()
+                            )
+                            .FirstOrDefault();
+
+                        List<TransactionOutput> offerOwnerTxOutputs = tx.Outputs
+                            .Where(o => 
+                            {
+                                string outputBech32Addr = o.Address.Raw.ToBech32()!;
+
+                                string pkh = Convert.ToHexString(new CardanoSharpAddress(outputBech32Addr).GetPublicKeyHash()).ToLowerInvariant();
+
+                                return pkh == offerOwnerPkh;
+                            })
+                            .ToList();
+                        
+                        if (offerOwnerTxOutputs.Count > 0)
+                        {
+                            try
+                            {
+                                List<string> offerOwnerTxOutputAssets = offerOwnerTxOutputs
+                                    .SelectMany(o => o.Amount.MultiAsset
+                                        .Select(ma => ma.Value
+                                            .Select(v => ma.Key.ToHex() + v.Key.ToHex()))
+                                        .FirstOrDefault()!)
+                                    .ToList();
+
+                                if (offerOwnerTxOutputAssets.Contains(offerOwnerPayoutAsset!.ToLowerInvariant()))
+                                {
+                                    spentListing.Status = ListingStatus.Sold;
+                                }
+                            }
+                            catch (Exception e)
+                            {
+                                _logger.LogError("Cannot evaluate MultiAssets from offerOwnerTxOutputs!");
+                            }
+                            finally
+                            {
+                                spentListing.Status = ListingStatus.Canceled;
+                            }
+                        }
+                        else
+                        {
+                            spentListing.Status = ListingStatus.Canceled;
+                        }
+                    }
                 }
             }
 
@@ -223,25 +328,47 @@ public class ListingByAddressReducer
                 {   
                     if (tx.MetaData is null) continue;
 
+                    byte[] outputDatumHash = output.Datum.Data;
+
                     List<string> datumCborHexList = JPGStoreUtils.MapMetadataToCborHexList(tx.MetaData.Value);
 
-                    byte[] datum = Convert.FromHexString(datumCborHexList[(int)output.Index]);
+                    // Check if the outputDatumHash can be constructed in one of the datum inside the list.
+                    byte[]? datum = null;
 
-                    string txOutputDatumHash = Convert.ToHexString(datum).ToLowerInvariant();
+                    Blake2b algorithm = HashAlgorithm.Blake2b_256;
 
-                    ChrysalisAddress? ownerCredential = pkh == _v1validatorPkh ? 
-                        JPGStoreUtils.GetOwnerCredentialFromDatum(datum, TransactionDatum.Listing) :
-                        JPGStoreUtils.GetOwnerCredentialFromDatum(datum, TransactionDatum.Offer);
+                    datumCborHexList.ForEach(datumCborHex => {
+                        byte[] hashedDatum = algorithm.Hash(Convert.FromHexString(datumCborHex));
 
-                    string ownerAddressBech32 = pkh == _v1validatorPkh ? 
-                        AddressUtility.GetEnterpriseAddress(CborSerializer.Deserialize<Listing>(datum)!.OwnerPkh.Value, CardanoSharp.Wallet.Enums.NetworkType.Mainnet).ToString() :
-                        AddressUtility.GetEnterpriseAddress(CborSerializer.Deserialize<Offer>(datum)!.OwnerPkh.Value, CardanoSharp.Wallet.Enums.NetworkType.Mainnet).ToString();
+                        if (outputDatumHash.SequenceEqual(hashedDatum))
+                        {
+                            datum = Convert.FromHexString(datumCborHex);
+                        }
+                    });
 
-                    if (ownerCredential is null)
+                    if (datum is null) continue;
+
+                    // Check if the datum is a listing or offer, then get the owner address.
+                    string? ownerAddressBech32 = null;
+
+                    if (pkh == _v1validatorPkh)
                     {
-                        _logger.LogInformation("Owner credential not found in payout addresses");
-                        continue;
+                        Listing? listingDatum = CborSerializer.Deserialize<Listing>(datum);
+
+                        if (listingDatum is null) continue;
+
+                        ownerAddressBech32 = GetAddressBech32FromListingDatum(listingDatum);
                     }
+                    else if (pkh == _v2validatorPkh)
+                    {
+                        Offer? offerDatum = CborSerializer.Deserialize<Offer>(datum);
+
+                        if (offerDatum is null) continue;
+
+                        ownerAddressBech32 = GetAddressBech32FromOfferDatum(offerDatum);
+                    }
+
+                    if (ownerAddressBech32 is null) continue;
 
                     ListingByAddress listingByAddress = new()
                     {
@@ -253,28 +380,18 @@ public class ListingByAddressReducer
                         {
                             Coin = output.Amount.Coin,
                             MultiAsset = output.Amount.MultiAsset.ToDictionary(k => k.Key.ToHex(), v => v.Value.ToDictionary(
-                            k => k.Key.ToHex(),
-                            v => v.Value
-                        ))
+                                k => k.Key.ToHex(),
+                                v => v.Value
+                            ))
                         },
                         UtxoStatus = UtxoStatus.Unspent,
                         Status = ListingStatus.Created,
                         EstimatedTotalListingValue = default,
                         EstimatedFromListingValue = default,
-                        EstimatedToListingValue = default
+                        EstimatedToListingValue = default,
+                        ListingDatumCbor = datum
                     };
-                    
-                    if (pkh == _v1validatorPkh)
-                    {
-                        Listing? listingDatum = CborSerializer.Deserialize<Listing>(datum);
-                        listingByAddress.ListingDatumCbor = CborSerializer.Serialize(listingDatum!);
-                    }
-                    else if (pkh == _v2validatorPkh) 
-                    {
-                        Offer? offerDatum = CborSerializer.Deserialize<Offer>(datum);
-                        listingByAddress.ListingDatumCbor = CborSerializer.Serialize(offerDatum!);
-                    }
-                    
+
                     _dbContext.Add(listingByAddress);
                 }
                 catch (Exception e)
@@ -285,5 +402,49 @@ public class ListingByAddressReducer
         }
 
         await Task.CompletedTask;
+    }
+
+    private string? GetAddressBech32FromListingDatum(Listing listingDatum)
+    {
+        ChrysalisAddress? listingOwnerAddress = listingDatum.Payouts.Value
+            .Select(po => po.Address)
+            .Where(a => Convert.ToHexString(((VerificationKey)a.PaymentCredential).VerificationKeyHash.Value).Equals(Convert.ToHexString(listingDatum.OwnerPkh.Value), StringComparison.InvariantCultureIgnoreCase))
+            .FirstOrDefault();
+
+        if (listingOwnerAddress is null) return null;
+
+        byte[] listingOwnerAddressPaymentVKey = ((VerificationKey)listingOwnerAddress.PaymentCredential).VerificationKeyHash.Value;
+
+        byte[]? listingOwnerAddressStakeVKey = JPGStoreUtils.GetStakeVerificationKeyFromAddress(listingOwnerAddress);
+
+        if (listingOwnerAddressStakeVKey is null) return null;
+
+        return AddressUtility.GetBaseAddress(
+            listingOwnerAddressPaymentVKey,
+            listingOwnerAddressStakeVKey,
+            CardanoSharp.Wallet.Enums.NetworkType.Mainnet
+        ).ToString();
+    }
+
+    private string? GetAddressBech32FromOfferDatum(Offer offerDatum)
+    {
+        ChrysalisAddress? offerOwnerAddress = offerDatum.Payouts.Value
+            .Select(po => po.Address)
+            .Where(a => Convert.ToHexString(((VerificationKey)a.PaymentCredential).VerificationKeyHash.Value).Equals(Convert.ToHexString(offerDatum.OwnerPkh.Value), StringComparison.InvariantCultureIgnoreCase))
+            .FirstOrDefault();
+
+        if (offerOwnerAddress is null) return null;
+
+        byte[] offerOwnerAddressPaymentVKey = ((VerificationKey)offerOwnerAddress.PaymentCredential).VerificationKeyHash.Value;
+
+        byte[]? offerOwnerAddressStakeVKey = JPGStoreUtils.GetStakeVerificationKeyFromAddress(offerOwnerAddress);
+
+        if (offerOwnerAddressStakeVKey is null) return null;
+
+        return AddressUtility.GetBaseAddress(
+            offerOwnerAddressPaymentVKey,
+            offerOwnerAddressStakeVKey,
+            CardanoSharp.Wallet.Enums.NetworkType.Mainnet
+        ).ToString();
     }
 }
