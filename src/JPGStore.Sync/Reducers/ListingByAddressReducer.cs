@@ -16,7 +16,6 @@ using CardanoSharp.Wallet.Extensions;
 using Crashr.Data.Models.Redeemers;
 using Chrysalis.Cbor;
 using JPGStore.Data.Models.Datums;
-using NSec.Cryptography;
 
 namespace JPGStore.Sync.Reducers;
 
@@ -140,11 +139,9 @@ public class ListingByAddressReducer
 
                     // Check if the outputDatumHash can be constructed in one of the datum inside the list.
                     byte[]? datum = null;
-
-                    Blake2b algorithm = HashAlgorithm.Blake2b_256;
-
+                    
                     datumCborHexList.ForEach(datumCborHex => {
-                        byte[] hashedDatum = algorithm.Hash(Convert.FromHexString(datumCborHex));
+                        byte[] hashedDatum = JPGStoreUtils.MapDatumToDatumHash(Convert.FromHexString(datumCborHex));
 
                         if (outputDatumHash.SequenceEqual(hashedDatum))
                         {
@@ -321,7 +318,7 @@ public class ListingByAddressReducer
         JPGStoreSyncDbContext _dbContext
     )
     {
-        byte[] spentListingDatumHash = MapDatumToDatumHash(spentListing.ListingDatumCbor);
+        byte[] spentListingDatumHash = JPGStoreUtils.MapDatumToDatumHash(spentListing.ListingDatumCbor);
 
         bool isUpdateOutputExist = false;
 
@@ -404,12 +401,5 @@ public class ListingByAddressReducer
         _dbContext.Add(spentListing);
 
         await Task.CompletedTask;
-    }
-
-    private byte[] MapDatumToDatumHash(byte[] datum)
-    {
-        Blake2b algorithm = HashAlgorithm.Blake2b_256;
-
-        return algorithm.Hash(datum);
     }
 }

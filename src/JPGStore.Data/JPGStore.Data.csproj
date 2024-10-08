@@ -13,6 +13,7 @@
     <PackageReference Include="SAIB.Cardano.Sync" Version="0.2.36-alpha" />
     <PackageReference Include="SAIB.CardanoSharp.Wallet" Version="7.3.4" />
     <PackageReference Include="CborSerializer" Version="1.0.10" />
+    <PackageReference Include="NSec.Cryptography" Version="24.4.0" />
   </ItemGroup>
 
   <ItemGroup>

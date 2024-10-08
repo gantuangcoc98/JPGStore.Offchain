@@ -2,14 +2,12 @@ using System.Text;
 using System.Text.Json;
 using CardanoSharp.Wallet.Enums;
 using Microsoft.Extensions.Configuration;
-using JPGStore.Data.Models.Enums;
 using JPGStore.Data.Models.Datums;
 using Chrysalis.Cardano.Models.Plutus;
 using ChrysalisAddress = Chrysalis.Cardano.Models.Plutus.Address;
-using Chrysalis.Cbor;
-using CborSerialization;
 using System.Text.RegularExpressions;
 using CardanoSharp.Wallet.Utilities;
+using NSec.Cryptography;
 
 namespace JPGStore.Data.Utils;
 
@@ -107,5 +105,12 @@ public static class JPGStoreUtils
             offerOwnerAddressStakeVKey,
             GetNetworkType(configuration)
         ).ToString();
+    }
+
+    public static byte[] MapDatumToDatumHash(byte[] datum)
+    {
+        Blake2b algorithm = HashAlgorithm.Blake2b_256;
+
+        return algorithm.Hash(datum);
     }
 }
