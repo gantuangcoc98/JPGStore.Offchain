@@ -9,6 +9,7 @@ using ChrysalisAddress = Chrysalis.Cardano.Models.Plutus.Address;
 using Chrysalis.Cbor;
 using CborSerialization;
 using System.Text.RegularExpressions;
+using CardanoSharp.Wallet.Utilities;
 
 namespace JPGStore.Data.Utils;
 
@@ -62,5 +63,49 @@ public static class JPGStoreUtils
         if (address.StakeCredential is not Some<Inline<Credential>> someInlineCredential) return null;
 
         return ((VerificationKey)someInlineCredential.Value.Value).VerificationKeyHash.Value;
+    }
+
+    public static string? GetAddressBech32FromListingDatum(Listing listingDatum, IConfiguration configuration)
+    {
+        ChrysalisAddress? listingOwnerAddress = listingDatum.Payouts.Value
+            .Select(po => po.Address)
+            .Where(a => Convert.ToHexString(((VerificationKey)a.PaymentCredential).VerificationKeyHash.Value).Equals(Convert.ToHexString(listingDatum.OwnerPkh.Value), StringComparison.InvariantCultureIgnoreCase))
+            .FirstOrDefault();
+
+        if (listingOwnerAddress is null) return null;
+
+        byte[] listingOwnerAddressPaymentVKey = ((VerificationKey)listingOwnerAddress.PaymentCredential).VerificationKeyHash.Value;
+
+        byte[]? listingOwnerAddressStakeVKey = GetStakeVerificationKeyFromAddress(listingOwnerAddress);
+
+        if (listingOwnerAddressStakeVKey is null) return null;
+
+        return AddressUtility.GetBaseAddress(
+            listingOwnerAddressPaymentVKey,
+            listingOwnerAddressStakeVKey,
+            GetNetworkType(configuration)
+        ).ToString();
+    }
+
+    public static string? GetAddressBech32FromOfferDatum(Offer offerDatum, IConfiguration configuration)
+    {
+        ChrysalisAddress? offerOwnerAddress = offerDatum.Payouts.Value
+            .Select(po => po.Address)
+            .Where(a => Convert.ToHexString(((VerificationKey)a.PaymentCredential).VerificationKeyHash.Value).Equals(Convert.ToHexString(offerDatum.OwnerPkh.Value), StringComparison.InvariantCultureIgnoreCase))
+            .FirstOrDefault();
+
+        if (offerOwnerAddress is null) return null;
+
+        byte[] offerOwnerAddressPaymentVKey = ((VerificationKey)offerOwnerAddress.PaymentCredential).VerificationKeyHash.Value;
+
+        byte[]? offerOwnerAddressStakeVKey = GetStakeVerificationKeyFromAddress(offerOwnerAddress);
+
+        if (offerOwnerAddressStakeVKey is null) return null;
+
+        return AddressUtility.GetBaseAddress(
+            offerOwnerAddressPaymentVKey,
+            offerOwnerAddressStakeVKey,
+            GetNetworkType(configuration)
+        ).ToString();
     }
 }
